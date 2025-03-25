@@ -86,6 +86,8 @@ pub mod rt {
 
             if self.use_named_connection {
                 Ok(tokio::net::TcpStream::connect_named(&self.config).await?)
+            } else if self.config.get_multi_subnet_failover() {
+                Ok(connect_first(&self.config.get_addr()).await?)
             } else {
                 Ok(tokio::net::TcpStream::connect(self.config.get_addr()).await?)
             }
@@ -93,11 +95,14 @@ pub mod rt {
 
         #[cfg(not(feature = "sql-browser"))]
         async fn connect_tcp(&self) -> std::io::Result<tokio::net::TcpStream> {
-            tokio::net::TcpStream::connect(self.config.get_addr()).await
+            if self.config.get_multi_subnet_failover() {
+                connect_first(&self.config.get_addr()).await
+            } else {
+                tokio::net::TcpStream::connect(self.config.get_addr()).await
+            }
         }
 
         pub(crate) async fn connect_inner(&self) -> Result<Client, super::Error> {
-            use tokio::net::TcpStream;
             use tokio_util::compat::TokioAsyncWriteCompatExt; //Tokio02AsyncWriteCompatExt;
 
             let tcp = self.connect_tcp().await?;
@@ -115,7 +120,12 @@ pub mod rt {
                     config.host(&host);
                     config.port(port);
 
-                    let tcp = TcpStream::connect(config.get_addr()).await?;
+                    let tcp = if self.config.get_multi_subnet_failover() {
+                        connect_first(&config.get_addr()).await?
+                    } else {
+                        tokio::net::TcpStream::connect(config.get_addr()).await?
+                    };
+
 
                     (self.modify_tcp_stream)(&tcp)?;
 
@@ -129,6 +139,27 @@ pub mod rt {
 
             Ok(client)
         }
+    }
+
+    async fn connect_first(addr: &str) -> Result<tokio::net::TcpStream, tokio::io::Error> {
+        use futures_util::stream::FuturesUnordered;
+        use futures_util::StreamExt;
+        use tokio::io::{Error, ErrorKind};
+
+        let addrs = tokio::net::lookup_host(addr).await?;
+
+        let mut first_error = None;
+        let mut futures = addrs
+            .map(tokio::net::TcpStream::connect)
+            .collect::<FuturesUnordered<_>>();
+        while let Some(connection) = futures.next().await {
+            match connection {
+                Ok(connection) => return Ok(connection),
+                Err(error) => first_error.get_or_insert(error),
+            };
+        }
+        Err(first_error
+            .unwrap_or_else(|| Error::new(ErrorKind::NotFound, "Could not resolve server host")))
     }
 }
 
@@ -151,12 +182,22 @@ pub mod rt {
         #[cfg(feature = "sql-browser")]
         async fn connect_tcp(&self) -> tiberius::Result<async_std::net::TcpStream> {
             use tiberius::SqlBrowser;
-            async_std::net::TcpStream::connect_named(&self.config).await
+            if self.use_named_connection {
+                async_std::net::TcpStream::connect_named(&self.config).await
+            } else if self.config.get_multi_subnet_failover() {
+                Ok(connect_first(&self.config.get_addr()).await?)
+            } else {
+                Ok(async_std::net::TcpStream::connect(self.config.get_addr()).await?)
+            }
         }
 
         #[cfg(not(feature = "sql-browser"))]
         async fn connect_tcp(&self) -> std::io::Result<async_std::net::TcpStream> {
-            async_std::net::TcpStream::connect(self.config.get_addr()).await
+            if self.config.get_multi_subnet_failover() {
+                Ok(connect_first(&self.config.get_addr()).await?)
+            } else {
+                Ok(async_std::net::TcpStream::connect(self.config.get_addr()).await?)
+            }
         }
 
         pub(crate) async fn connect_inner(&self) -> Result<Client, super::Error> {
@@ -189,6 +230,29 @@ pub mod rt {
 
             Ok(client)
         }
+    }
+
+    async fn connect_first(addr: &impl async_std::net::ToSocketAddrs) -> Result<async_std::net::TcpStream, std::io::Error> {
+        use futures_util::stream::FuturesUnordered;
+        use futures_util::StreamExt;
+        use async_std::io::ErrorKind;
+        //use async_std::net::Error;
+
+        let addrs = addr.to_socket_addrs().await?;
+        //let addrs = async_std::net::lookup_host(addr).await?;
+
+        let mut first_error = None;
+        let mut futures = addrs
+            .map(async_std::net::TcpStream::connect)
+            .collect::<FuturesUnordered<_>>();
+        while let Some(connection) = futures.next().await {
+            match connection {
+                Ok(connection) => return Ok(connection),
+                Err(error) => first_error.get_or_insert(error),
+            };
+        }
+        Err(first_error
+            .unwrap_or_else(|| std::io::Error::new(ErrorKind::NotFound, "Could not resolve server host")))
     }
 }
 
