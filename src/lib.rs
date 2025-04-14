@@ -150,12 +150,21 @@ pub mod rt {
 
         let mut first_error = None;
         let mut futures = addrs
-            .map(tokio::net::TcpStream::connect)
+            .map(async |addr| {
+                (addr, tokio::net::TcpStream::connect(addr).await)
+            })
             .collect::<FuturesUnordered<_>>();
         while let Some(connection) = futures.next().await {
             match connection {
-                Ok(connection) => return Ok(connection),
-                Err(error) => first_error.get_or_insert(error),
+                (addr, Ok(connection)) => {
+                    tracing::debug!(%addr, "Got Tcp connection");
+                    return Ok(connection)
+                }
+                (addr, Err(error)) => {
+                    // Only log as info, if all fails, first error will be returned, caller decides what to do.
+                    tracing::info!(%addr, %error, "Tcp connection failed");
+                    first_error.get_or_insert(error)
+                }
             };
         }
         Err(first_error
