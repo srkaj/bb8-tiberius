@@ -274,11 +274,28 @@ impl bb8::ManageConnection for ConnectionManager {
     }
 
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        conn.simple_query("SELECT 1").await?;
-        Ok(())
+        let start = tokio::time::Instant::now();
+        tracing::debug!("Checking connection validity");
+        let result = inner_valid_check(conn).await;
+        let elapsed = start.elapsed();
+        match result {
+            Ok(()) => {
+                tracing::debug!(?elapsed, "Checking connection validity done");
+                Ok(())
+            }
+            Err(error) => {
+                tracing::info!(?elapsed, %error, "Checking connection validity failed");
+                Err(error)
+            }
+        }
     }
 
     fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
         false
     }
+}
+
+async fn inner_valid_check(conn: &mut rt::Client) -> Result<(), Error> {
+    conn.simple_query("SELECT 1").await?.into_row().await?;
+    Ok(())
 }
